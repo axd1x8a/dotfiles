@@ -195,6 +195,18 @@ zinit for \
     run-atpull \
     zdharma-continuum/null
 
+# git
+zinit for \
+    wait lucid as"completion" \
+    id-as"git-completion" \
+    blockf \
+    nocompile \
+    has"git" \
+    atclone"curl -o _git https://raw.githubusercontent.com/git/git/master/contrib/completion/git-completion.zsh" \
+    atpull"%atclone" \
+    run-atpull \
+    zdharma-continuum/null
+
 # rust boolshit
 if [[ -e $HOME/.cargo ]]; then
     case ":${PATH}:" in
@@ -222,7 +234,7 @@ if [[ -e $HOME/.cargo ]]; then
         blockf \
         nocompile \
         has"cargo" \
-        atclone"rustup completions zsh cargo > _rustup" \
+        atclone"rustup completions zsh cargo > _cargo" \
         atpull"%atclone" \
         run-atpull \
         zdharma-continuum/null
