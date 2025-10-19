@@ -171,6 +171,34 @@ load_prompt() {
 PROMPT=''
 zsh-defer load_prompt
 
+# --- System specific stuff ---------------------------------------------------------
+
+if [[ $OSTYPE != Windows_NT && $OSTYPE != cygwin && $OSTYPE != msys ]]; then
+    # remove existing _docker completion function without removing the file
+    # for some reason, /usr/share/zsh/vendor-completions/_docker always gets loaded
+    # over the generated one
+    if [[ -e /usr/share/zsh/vendor-completions/_docker ]]; then
+        unfunction _docker
+    fi
+
+    case ":${PATH}:" in
+        *:"$HOME/.local/bin":*)
+            ;;
+        *)
+        export PATH="$HOME/.local/bin:$PATH"
+        ;;
+    esac
+
+elif [[ $OSTYPE == msys ]]; then
+    explorer() {
+        if [[ -n "$1" ]]; then
+            explorer.exe "$(cygpath -w "$1")"
+        else
+            explorer.exe "$(cygpath -w .)"
+        fi
+    }
+fi
+
 # --- History configuration ---------------------------------------------------------
 
 # Sourced from Oh My Zsh
