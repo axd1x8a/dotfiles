@@ -118,9 +118,9 @@ zstyle ':autocomplete:*' min-input 2
 zstyle ':completion:correct-word:*' max-errors 10
 zstyle ':autocomplete:history-search-backward:*' list-lines 256
 zstyle ':autocomplete:history-incremental-search-backward:*' list-lines 8
+zstyle ':autocomplete:*' append-semicolon off
 zstyle ':completion:*' ignored-patterns '*.dll'
 zstyle ':completion:*' completer _expand _complete _match _prefix
-
 # --- agkozak prompt ----------------------------------------------------------------
 
 load_prompt() {
