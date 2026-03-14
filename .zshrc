@@ -469,6 +469,12 @@ else
         _ZOXIDE_CMD_NOT_FOUND=''
     }
     add-zsh-hook precmd _zoxide_error_precmd
+
+    chpwd_recent_filehandler() {
+        reply=( ${(f)"$(zoxide query --list 2>/dev/null)"} )
+    }
+
+    chpwd_recent_dirs() {}
 fi
 
 # --- Completion system init --------------------------------------------------------
