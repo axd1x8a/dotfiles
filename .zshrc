@@ -466,7 +466,7 @@ else
         if [[ -n $BUFFER && $BUFFER != *' '* ]] \
             && ! whence "$BUFFER" >/dev/null 2>&1 \
             && [[ ! -d $BUFFER ]]; then
-            local target cmd=$BUFFER
+            local target
             target=$(zoxide query -- "$BUFFER" 2>/dev/null)
             if [[ -n $target ]]; then
                 cd "$target"
@@ -474,22 +474,10 @@ else
                 zle .reset-prompt
                 return
             fi
-            _ZOXIDE_CMD_NOT_FOUND=$cmd
-            BUFFER=''
-            zle .accept-line
-            return
         fi
         zle .accept-line
     }
     zle -N accept-line _zoxide_autocd_widget
-
-    _zoxide_error_precmd() {
-        [[ -z $_ZOXIDE_CMD_NOT_FOUND ]] && return
-        print -P "%F{red}zsh: command not found: ${_ZOXIDE_CMD_NOT_FOUND}%f"
-        _ZOXIDE_CMD_NOT_FOUND=''
-    }
-    add-zsh-hook precmd _zoxide_error_precmd
-
     chpwd_recent_filehandler() {
         reply=( ${(f)"$(zoxide query --list 2>/dev/null)"} )
     }
