@@ -12,6 +12,12 @@ mkdir -p "$ZSH_PLUGIN_DIR" "$ZSH_COMPLETION_DIR" "$ZSH_CACHE_DIR"
 
 zsh_update() {
     print -P "%F{yellow}Updating Zsh plugins and completions...%f"
+    print -P "%F{yellow}Clearing compiled cache...%f"
+    command find "$ZSH_DATA_ROOT" "$ZSH_CACHE_DIR" \
+        -name '*.zwc' -delete 2>/dev/null
+    rm -f "${ZDOTDIR:-$HOME}"/.z{shrc,compdump}.zwc 2>/dev/null
+
+    rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/zsh-autocomplete" 2>/dev/null
     ZSH_UPDATING=1 exec zsh
 }
 
@@ -23,7 +29,7 @@ zcompile_many() {
 zcompile_one() {
     local file="$1"
     [[ -f $file ]] || return
-    if [[ ! -f ${file}.zwc || $file -nt ${file}.zwc ]]; then
+    if [[ -n "$ZSH_UPDATING" || ! -f ${file}.zwc || $file -nt ${file}.zwc ]]; then
         zcompile -R -- "${file}.zwc" "$file" 2>/dev/null
     fi
 }
@@ -34,7 +40,13 @@ ensure_repo() {
         if (( ${+ZSH_UPDATING} )); then
             print -P "%F{cyan}Updating repo:%f ${dest:t}"
             if [[ -n $ref ]]; then
-                git -C "$dest" fetch --quiet 2>/dev/null || true
+                if [[ -f "${dest}/.git/shallow" ]]; then
+                    print -P "%F{cyan}Unshallowing:%f ${dest:t}"
+                    git -C "$dest" fetch --unshallow --quiet 2>/dev/null || \
+                        git -C "$dest" fetch --quiet 2>/dev/null || true
+                else
+                    git -C "$dest" fetch --quiet 2>/dev/null || true
+                fi
                 git -C "$dest" checkout --quiet "$ref" 2>/dev/null || true
             else
                 git -C "$dest" pull --ff-only --quiet 2>/dev/null || true
