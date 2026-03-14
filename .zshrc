@@ -1,4 +1,7 @@
 # zmodload zsh/zprof
+zmodload zsh/files
+zmodload zsh/stat
+zmodload zsh/datetime
 
 typeset -g ZSH_DATA_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}/zsh"
 typeset -g ZSH_PLUGIN_DIR="${ZSH_DATA_ROOT}/plugins"
@@ -48,6 +51,15 @@ ensure_remote_file() {
     fi
 }
 
+ensure_eval_cache() {
+    local cmd="$1" file="$2"
+    if [[ ! -f "$file" || -n "$ZSH_UPDATING" ]]; then
+        if (( ${+ZSH_UPDATING} )); then print -P "%F{cyan}Updating cache:%f ${file:t}"; fi
+        eval "$cmd" >| "$file" 2>/dev/null || return
+        zcompile_one "$file"
+    fi
+}
+
 generate_completion() {
     local file="$1"; shift
     local -a cmd=("$@")
@@ -92,17 +104,14 @@ copy_completion() {
 
 # --- zsh-defer ---------------------------------------------------------------------
 
-typeset -g ZSHDEFER_DIR="${ZSH_PLUGIN_DIR}/zsh-defer"
-ensure_repo "https://github.com/romkatv/zsh-defer.git" "$ZSHDEFER_DIR"
-if (( ${+ZSH_UPDATING} )); then
-    zcompile_one "${ZSHDEFER_DIR}/zsh-defer.plugin.zsh"
-fi
-source "${ZSHDEFER_DIR}/zsh-defer.plugin.zsh"
+# typeset -g ZSHDEFER_DIR="${ZSH_PLUGIN_DIR}/zsh-defer"
+# ensure_repo "https://github.com/romkatv/zsh-defer.git" "$ZSHDEFER_DIR"
+# if (( ${+ZSH_UPDATING} )); then
+#     zcompile_one "${ZSHDEFER_DIR}/zsh-defer.plugin.zsh"
+# fi
+# source "${ZSHDEFER_DIR}/zsh-defer.plugin.zsh"
 
 # --- Core autoloads ----------------------------------------------------------------
-
-autoload -Uz colors && colors
-autoload -Uz add-zsh-hook
 
 skip_global_compinit=1
 setopt prompt_subst
@@ -112,54 +121,110 @@ setopt MENU_COMPLETE
 setopt AUTO_LIST
 setopt COMPLETE_IN_WORD
 setopt HASH_EXECUTABLES_ONLY
+# setopt NO_HASH_CMDS
+# setopt NO_HASH_DIRS
+setopt AUTO_CD
 
 zstyle ':autocomplete:*' min-delay 0.1
 zstyle ':autocomplete:*' min-input 2
-zstyle ':completion:correct-word:*' max-errors 10
+zstyle ':completion:correct-word:*' max-errors 5
+zstyle ':autocomplete:*complete*:*' insert-unambiguous yes
+zstyle ':autocomplete:*history*:*' insert-unambiguous yes
 zstyle ':autocomplete:history-search-backward:*' list-lines 256
 zstyle ':autocomplete:history-incremental-search-backward:*' list-lines 8
-zstyle ':autocomplete:*' append-semicolon off
-zstyle ':completion:*' ignored-patterns '*.dll'
+zstyle ':autocomplete:*' add-semicolon no
+# zstyle ':completion:*' ignored-patterns '*.dll'
 zstyle ':completion:*' completer _expand _complete _match _prefix
-# --- agkozak prompt ----------------------------------------------------------------
+zstyle '*:compinit' arguments -C
+
+# --- Prompt ------------------------------------------------------------------------
+#
+# Sourced from agkozak-zsh-prompt
+
+autoload -Uz add-zsh-hook
 
 load_prompt() {
-    typeset -g AGKOZAK_DIR="${ZSH_PLUGIN_DIR}/agkozak-zsh-prompt"
-    ensure_repo "https://github.com/agkozak/agkozak-zsh-prompt.git" "$AGKOZAK_DIR"
+    autoload -Uz colors && colors
+    setopt PROMPT_CR PROMPT_SP
 
-    local -a agkozak_files=()
-    agkozak_files+=("${AGKOZAK_DIR}"/agkozak-zsh-prompt.plugin.zsh(N))
-    agkozak_files+=("${AGKOZAK_DIR}"/lib/*.zsh(N))
-    (( ${#agkozak_files[@]} )) && zcompile_many "${agkozak_files[@]}"
+    # --- Git branch + status symbols -----------------------------------------------
+    #
+    # Returns a string like " (main ⇡)" or " (main)" or nothing outside a repo
 
-    source "${AGKOZAK_DIR}/agkozak-zsh-prompt.plugin.zsh"
+    _prompt_git_status() {
+        local ref branch
+        ref=$(command git symbolic-ref --quiet HEAD 2>/dev/null)
+        case $? in
+            0) ;;           # normal branch
+            128) return ;;  # not a git repo
+            *) ref=$(command git rev-parse --short HEAD 2>/dev/null) || return ;;
+        esac
+        branch=${ref#refs/heads/}
+        [[ -z $branch ]] && return
 
-    virtualenv_prompt_info() {}
+        local git_status symbols i
+        git_status="$(LC_ALL=C GIT_OPTIONAL_LOCKS=0 command git status 2>&1)"
 
-    setopt PROMPT_CR
-    setopt PROMPT_SP
+        local -a sym=('⇣⇡' '⇣' '⇡' '+' 'x' '!' '>' '?')
+        local -a pat=(
+            ' have diverged,'
+            'Your branch is behind '
+            'Your branch is ahead of '
+            'new file:   '
+            'deleted:    '
+            'modified:   '
+            'renamed:    '
+            'Untracked files:'
+        )
+        for (( i = 1; i <= $#pat; i++ )); do
+            [[ $git_status == *${pat[i]}* ]] && symbols+=${sym[i]}
+        done
 
-    AGKOZAK_LEFT_PROMPT_ONLY=1
-    AGKOZAK_SHOW_VIRTUALENV=0
-    AGKOZAK_PROMPT_DIRTRIM=0
-    AGKOZAK_CMD_EXEC_TIME=0
-    AGKOZAK_USER_HOST_DISPLAY=0
-    AGKOZAK_SHOW_BG=0
-    AGKOZAK_SHOW_STASH=0
-    AGKOZAK_MULTILINE=1
-    AGKOZAK_BLANK_LINES=0
+        [[ -n $symbols ]] && symbols=" $symbols"
+        printf ' (%s%s)' "$branch" "$symbols"
+    }
 
-    AGKOZAK_CUSTOM_SYMBOLS=('⇣⇡' '⇣' '⇡' '+' 'x' '!' '>' '?' 'S')
+    # Populate psvar[3] (full string), psvar[6] (branch), psvar[7] (symbols).
+    # These are what PROMPT references via %(3V…), %6v, %(7V…).
+    _prompt_set_git_psvars() {
+        psvar[3]="$1"
+        psvar[6]=${${${1#*\(}% *}%\)}
+        if [[ ${1#*\(} == *' '* ]]; then
+            psvar[7]=${${1%\)}##* }
+        else
+            psvar[7]=''
+        fi
+    }
 
-    AGKOZAK_CUSTOM_PROMPT=''
-    if [[ -v WSL_DISTRO_NAME ]]; then
-        AGKOZAK_CUSTOM_PROMPT+='%{$fg_bold[red]%}(WSL)%{$reset_color%} '
-    fi
-    AGKOZAK_CUSTOM_PROMPT+='%{$fg_bold[cyan]%}%d%{$reset_color%} '
-    AGKOZAK_CUSTOM_PROMPT+='%{$(virtualenv_prompt_info)%}'
-    AGKOZAK_CUSTOM_PROMPT+='%{%(3V.${ZSH_THEME_GIT_PROMPT_PREFIX}%6v%(7V.::%7v.)${ZSH_THEME_GIT_PROMPT_CLEAN}${ZSH_THEME_GIT_PROMPT_SUFFIX}.)%}'
-    AGKOZAK_CUSTOM_PROMPT+=$'\n'
-    AGKOZAK_CUSTOM_PROMPT+='%(?:%{$fg_bold[green]%}➜:%{$fg_bold[red]%}➜)  %{$reset_color%}$ '
+    typeset -g _PROMPT_GIT_FD=''
+
+    _prompt_git_callback() {
+        local fd=$1 response
+        IFS='' builtin read -rs -d $'\0' -u "$fd" response
+        zle -F $fd 2>/dev/null
+        exec {fd}<&-
+        _PROMPT_GIT_FD=''
+        _prompt_set_git_psvars "$response"
+        zle && zle .reset-prompt
+    }
+
+    _prompt_precmd() {
+        # Cancel any still-running fetch from the previous prompt.
+        if [[ -n $_PROMPT_GIT_FD ]]; then
+            zle -F $_PROMPT_GIT_FD 2>/dev/null
+            exec {_PROMPT_GIT_FD}<&- 2>/dev/null
+            _PROMPT_GIT_FD=''
+        fi
+        # Clear stale git info immediately; it will be repopulated by the callback.
+        _prompt_set_git_psvars ''
+        # Fork the status check and register the ZLE fd watcher.
+        exec {_PROMPT_GIT_FD} < <(_prompt_git_status)
+        zle -F $_PROMPT_GIT_FD _prompt_git_callback
+    }
+
+    add-zsh-hook precmd _prompt_precmd
+
+    # --- Theme variables -----------------------------------------------------------
 
     ZSH_THEME_GIT_PROMPT_PREFIX="%{$fg_bold[blue]%}(%{$fg[red]%}"
     ZSH_THEME_GIT_PROMPT_SUFFIX="%{$reset_color%}"
@@ -167,9 +232,20 @@ load_prompt() {
     ZSH_THEME_GIT_PROMPT_CLEAN="%{$fg[blue]%}) "
     ZSH_THEME_VIRTUALENV_PREFIX="%{$fg_bold[blue]%}(%{$fg[green]%}"
     ZSH_THEME_VIRTUALENV_SUFFIX="%{$fg[blue]%}) "
+
+    # --- Build PROMPT --------------------------------------------------------------
+
+    PROMPT=''
+    [[ -v WSL_DISTRO_NAME ]] && PROMPT+='%{$fg_bold[red]%}(WSL)%{$reset_color%} '
+    PROMPT+='%{$fg_bold[cyan]%}%d%{$reset_color%} '
+    PROMPT+='%{$(virtualenv_prompt_info)%}'
+    PROMPT+='%{%(3V.${ZSH_THEME_GIT_PROMPT_PREFIX}%6v%(7V.::%7v.)${ZSH_THEME_GIT_PROMPT_CLEAN}${ZSH_THEME_GIT_PROMPT_SUFFIX}.)%}'
+    PROMPT+=$'\n'
+    PROMPT+='%(?:%{$fg_bold[green]%}➜:%{$fg_bold[red]%}➜)  %{$reset_color%}$ '
 }
+
 PROMPT=''
-zsh-defer load_prompt
+load_prompt
 
 # --- System specific stuff ---------------------------------------------------------
 
@@ -197,6 +273,7 @@ elif [[ $OSTYPE == msys ]]; then
             explorer.exe "$(cygpath -w .)"
         fi
     }
+    zstyle ':completion:*' fake-files '/: c v'
 fi
 
 # --- History configuration ---------------------------------------------------------
@@ -293,7 +370,7 @@ load_zsh_autocomplete() {
     unset -f __init_autocomplete
 }
 
-zsh-defer load_zsh_autocomplete
+load_zsh_autocomplete
 
 # --- Oh My Zsh virtualenv plugin ---------------------------------------------------
 
@@ -343,11 +420,55 @@ __python_venv
 
 # --- UV installer (if missing) -----------------------------------------------------
 
-if ! whence -p uv >/dev/null 2>&1; then
+if [[ ! -f "$HOME/.local/bin/uv" && ! -f "$HOME/.local/bin/uv.exe" ]]; then
     setup_uv() {
         print -P "%F{yellow}Installing uv...%f"
         curl -LsSf https://astral.sh/uv/install.sh | sh
     }
+fi
+
+# --- Zoxide ------------------------------------------------------------------------
+
+if [[ ! -f "$HOME/.local/bin/zoxide" && ! -f "$HOME/.local/bin/zoxide.exe" ]]; then
+    setup_zoxide() {
+        print -P "%F{yellow}Installing zoxide...%f"
+        curl -sSfL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh
+    }
+else
+    ensure_eval_cache \
+        "zoxide init zsh --cmd cd" \
+        "${ZSH_CACHE_DIR}/zoxide.zsh"
+    source "${ZSH_CACHE_DIR}/zoxide.zsh"
+
+    typeset -g _ZOXIDE_CMD_NOT_FOUND=''
+
+    _zoxide_autocd_widget() {
+        if [[ -n $BUFFER && $BUFFER != *' '* ]] \
+            && ! whence "$BUFFER" >/dev/null 2>&1 \
+            && [[ ! -d $BUFFER ]]; then
+            local target cmd=$BUFFER
+            target=$(zoxide query -- "$BUFFER" 2>/dev/null)
+            if [[ -n $target ]]; then
+                cd "$target"
+                BUFFER=''
+                zle .reset-prompt
+                return
+            fi
+            _ZOXIDE_CMD_NOT_FOUND=$cmd
+            BUFFER=''
+            zle .accept-line
+            return
+        fi
+        zle .accept-line
+    }
+    zle -N accept-line _zoxide_autocd_widget
+
+    _zoxide_error_precmd() {
+        [[ -z $_ZOXIDE_CMD_NOT_FOUND ]] && return
+        print -P "%F{red}zsh: command not found: ${_ZOXIDE_CMD_NOT_FOUND}%f"
+        _ZOXIDE_CMD_NOT_FOUND=''
+    }
+    add-zsh-hook precmd _zoxide_error_precmd
 fi
 
 # --- Completion system init --------------------------------------------------------
@@ -368,29 +489,24 @@ load_completions() {
     generate_completion "${ZSH_COMPLETION_DIR}/_rustup"   rustup completions zsh rustup
     download_completion "${ZSH_COMPLETION_DIR}/_git"      https://raw.githubusercontent.com/git/git/master/contrib/completion/git-completion.zsh
 
-    if whence -p pip >/dev/null 2>&1; then
+    [[ -f "${ZSH_COMPLETION_DIR}/_pip" ]] || \
         generate_completion "${ZSH_COMPLETION_DIR}/_pip"      pip completion --zsh
-    fi
 
-    if whence -p docker >/dev/null 2>&1; then
+
+    [[ -f "${ZSH_COMPLETION_DIR}/_docker" ]] || \
         generate_completion "${ZSH_COMPLETION_DIR}/_docker"   docker completion zsh
-    fi
 
-    if whence -p rustc >/dev/null 2>&1 && [[ -z "$ZSH_UPDATING" || ! -f "${ZSH_COMPLETION_DIR}/_cargo" ]]; then
+    if [[ ! -f "${ZSH_COMPLETION_DIR}/_cargo" || -n "$ZSH_UPDATING" ]]; then
+        local sysroot
         sysroot="$(rustc --print sysroot 2>/dev/null)"
-
         if [[ -n $sysroot ]]; then
-            cargo_completion_src="${sysroot}/share/zsh/site-functions/_cargo"
-            cargo_completion_dest="${ZSH_COMPLETION_DIR}/_cargo"
-            copy_completion "$cargo_completion_src" "$cargo_completion_dest"
+            copy_completion \
+                "${sysroot}/share/zsh/site-functions/_cargo" \
+                "${ZSH_COMPLETION_DIR}/_cargo"
         fi
     fi
-
-    autoload -Uz compinit
-    compinit -C
-    [[ ~/.zcompdump.zwc -nt ~/.zcompdump ]] || zcompile_one ~/.zcompdump
 }
-zsh-defer load_completions
+load_completions
 
 
 # --- Self Compile ------------------------------------------------------------------
@@ -401,8 +517,11 @@ if [[ ! -f "${ZSHRC_PATH}.zwc" || "${ZSHRC_PATH}" -nt "${ZSHRC_PATH}.zwc" ]]; th
 fi
 
 # --- Final cleanup / optional helpers ----------------------------------------------
-
-if (( ! ${+ZSH_UPDATING} )); then
-    unset -f zcompile_many zcompile_one ensure_repo ensure_remote_file copy_completion 2>/dev/null || true
-fi
+_prompt_cleanup_helpers() {
+    (( ${+ZSH_UPDATING} )) && return
+    unset -f zcompile_many zcompile_one ensure_repo ensure_remote_file ensure_eval_cache \
+             generate_completion download_completion copy_completion \
+             _prompt_cleanup_helpers 2>/dev/null || true
+}
+_prompt_cleanup_helpers
 # zprof > "$HOME/zsh-profiling.txt"
