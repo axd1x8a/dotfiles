@@ -29,15 +29,25 @@ zcompile_one() {
 }
 
 ensure_repo() {
-    local url="$1" dest="$2"
+    local url="$1" dest="$2" ref="${3:-}"
     if [[ -d "${dest}/.git" ]]; then
         if (( ${+ZSH_UPDATING} )); then
             print -P "%F{cyan}Updating repo:%f ${dest:t}"
-            git -C "$dest" pull --ff-only --quiet 2>/dev/null || true
+            if [[ -n $ref ]]; then
+                git -C "$dest" fetch --quiet 2>/dev/null || true
+                git -C "$dest" checkout --quiet "$ref" 2>/dev/null || true
+            else
+                git -C "$dest" pull --ff-only --quiet 2>/dev/null || true
+            fi
         fi
     else
         print -P "%F{green}Cloning repo:%f ${dest:t}"
-        git clone --depth=1 "$url" "$dest" >/dev/null 2>&1 || return
+        if [[ -n $ref ]]; then
+            git clone --quiet "$url" "$dest" >/dev/null 2>&1 || return
+            git -C "$dest" checkout --quiet "$ref" 2>/dev/null || true
+        else
+            git clone --depth=1 "$url" "$dest" >/dev/null 2>&1 || return
+        fi
     fi
 }
 
@@ -139,7 +149,7 @@ zstyle '*:compinit' arguments -C
 
 # --- Prompt ------------------------------------------------------------------------
 #
-# Sourced from agkozak-zsh-prompt
+# Inspired by agkozak-zsh-prompt
 
 autoload -Uz add-zsh-hook
 
@@ -197,6 +207,7 @@ load_prompt() {
     }
 
     typeset -g _PROMPT_GIT_FD=''
+    typeset -g _PROMPT_READY=0
 
     _prompt_git_callback() {
         local fd=$1 response
@@ -205,7 +216,13 @@ load_prompt() {
         exec {fd}<&-
         _PROMPT_GIT_FD=''
         _prompt_set_git_psvars "$response"
-        zle && zle .reset-prompt
+        if zle && [[ -z $BUFFER ]] && (( _PROMPT_READY )); then
+            zle .reset-prompt
+        fi
+    }
+
+    _prompt_preexec() {
+        _PROMPT_READY=0
     }
 
     _prompt_precmd() {
@@ -215,13 +232,13 @@ load_prompt() {
             exec {_PROMPT_GIT_FD}<&- 2>/dev/null
             _PROMPT_GIT_FD=''
         fi
-        # Clear stale git info immediately; it will be repopulated by the callback.
         _prompt_set_git_psvars ''
-        # Fork the status check and register the ZLE fd watcher.
         exec {_PROMPT_GIT_FD} < <(_prompt_git_status)
         zle -F $_PROMPT_GIT_FD _prompt_git_callback
+        _PROMPT_READY=1
     }
 
+    add-zsh-hook preexec _prompt_preexec
     add-zsh-hook precmd _prompt_precmd
 
     # --- Theme variables -----------------------------------------------------------
@@ -343,7 +360,10 @@ load_omz_libs
 
 load_zsh_autocomplete() {
     typeset -g ZSHAUTO_DIR="${ZSH_PLUGIN_DIR}/zsh-autocomplete"
-    ensure_repo "https://github.com/marlonrichert/zsh-autocomplete.git" "$ZSHAUTO_DIR"
+    ensure_repo \
+        "https://github.com/marlonrichert/zsh-autocomplete.git" \
+        "$ZSHAUTO_DIR" \
+        "2be4e7f0b435138b0237d4f068b2a882fb06edc4^"
 
     [[ -f "${ZSHAUTO_DIR}/zsh-autocomplete.plugin.zsh" ]] || return
 
