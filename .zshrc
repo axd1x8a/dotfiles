@@ -154,7 +154,6 @@ zstyle ':autocomplete:*complete*:*' insert-unambiguous yes
 zstyle ':autocomplete:*history*:*' insert-unambiguous yes
 zstyle ':autocomplete:history-search-backward:*' list-lines 256
 zstyle ':autocomplete:history-incremental-search-backward:*' list-lines 8
-zstyle ':autocomplete:*' add-semicolon no
 # zstyle ':completion:*' ignored-patterns '*.dll'
 zstyle ':completion:*' completer _expand _complete _match _prefix
 zstyle '*:compinit' arguments -C
