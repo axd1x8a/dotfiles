@@ -217,35 +217,37 @@ load_prompt() {
         fi
     }
 
-    typeset -g _PROMPT_GIT_FD=''
     typeset -g _PROMPT_READY=0
 
-    _prompt_git_callback() {
-        local fd=$1 response
-        IFS='' builtin read -rs -d $'\0' -u "$fd" response
-        zle -F $fd 2>/dev/null
-        exec {fd}<&-
-        _PROMPT_GIT_FD=''
+    _prompt_preexec() {
+        _PROMPT_READY=0
+    }
+
+    _prompt_git_status_async() {
+        _prompt_git_status >| "/tmp/_prompt_git_$$"
+        kill -USR1 $$ 2>/dev/null
+    }
+
+    TRAPUSR1() {
+        [[ -f "/tmp/_prompt_git_$$" ]] || return
+        local response
+        response=$(< "/tmp/_prompt_git_$$")
+        rm -f "/tmp/_prompt_git_$$"
         _prompt_set_git_psvars "$response"
         if zle && [[ -z $BUFFER ]] && (( _PROMPT_READY )); then
             zle .reset-prompt
         fi
     }
 
-    _prompt_preexec() {
-        _PROMPT_READY=0
-    }
-
     _prompt_precmd() {
-        # Cancel any still-running fetch from the previous prompt.
-        if [[ -n $_PROMPT_GIT_FD ]]; then
-            zle -F $_PROMPT_GIT_FD 2>/dev/null
-            exec {_PROMPT_GIT_FD}<&- 2>/dev/null
-            _PROMPT_GIT_FD=''
+        if [[ -n $_PROMPT_GIT_PID ]]; then
+            kill -HUP $_PROMPT_GIT_PID 2>/dev/null
+            _PROMPT_GIT_PID=''
         fi
+        rm -f "/tmp/_prompt_git_$$"
         _prompt_set_git_psvars ''
-        exec {_PROMPT_GIT_FD} < <(_prompt_git_status)
-        zle -F $_PROMPT_GIT_FD _prompt_git_callback
+        _prompt_git_status_async &!
+        _PROMPT_GIT_PID=$!
         _PROMPT_READY=1
     }
 
