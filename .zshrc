@@ -12,6 +12,12 @@ mkdir -p "$ZSH_PLUGIN_DIR" "$ZSH_COMPLETION_DIR" "$ZSH_CACHE_DIR"
 
 zsh_update() {
     print -P "%F{yellow}Updating Zsh plugins and completions...%f"
+
+    if (( ${+functions[async_stop_worker]} )); then
+        print -P "%F{cyan}Stopping async workers...%f"
+        async_stop_worker _main_worker 2>/dev/null
+    fi
+
     print -P "%F{yellow}Clearing compiled cache...%f"
     command find "$ZSH_DATA_ROOT" "$ZSH_CACHE_DIR" \
         -name '*.zwc' -delete 2>/dev/null
@@ -65,10 +71,9 @@ ensure_repo() {
 
 ensure_remote_file() {
     local url="$1" dest="$2"
-    mkdir -p "${dest:h}"
     if [[ ! -f "$dest" || -n "$ZSH_UPDATING" ]]; then
         if (( ${+ZSH_UPDATING} )); then print -P "%F{cyan}Updating file:%f ${dest:t}"; fi
-        curl -fsSL "$url" -o "$dest" 2>/dev/null || return
+        curl -fsSL --create-dirs "$url" -o "$dest" 2>/dev/null || return
         zcompile_one "$dest"
     fi
 }
@@ -124,14 +129,48 @@ copy_completion() {
     fi
 }
 
-# --- zsh-defer ---------------------------------------------------------------------
+# --- zsh-async --------------------------------------------------------------------
+typeset -g ZSHASYNC_FILE="${ZSH_PLUGIN_DIR}/zsh-async/async.zsh"
+ensure_remote_file \
+    "https://raw.githubusercontent.com/mafredri/zsh-async/master/async.zsh" \
+    "$ZSHASYNC_FILE"
+source "$ZSHASYNC_FILE"
 
-# typeset -g ZSHDEFER_DIR="${ZSH_PLUGIN_DIR}/zsh-defer"
-# ensure_repo "https://github.com/romkatv/zsh-defer.git" "$ZSHDEFER_DIR"
-# if (( ${+ZSH_UPDATING} )); then
-#     zcompile_one "${ZSHDEFER_DIR}/zsh-defer.plugin.zsh"
-# fi
-# source "${ZSHDEFER_DIR}/zsh-defer.plugin.zsh"
+# --- Zoxide ------------------------------------------------------------------------
+
+typeset -g _HAS_ZOXIDE=0
+if [[ -x "$(command -v zoxide)" ]]; then
+    _HAS_ZOXIDE=1
+    ensure_eval_cache "zoxide init zsh --cmd cd" "${ZSH_CACHE_DIR}/zoxide.zsh"
+    source "${ZSH_CACHE_DIR}/zoxide.zsh"
+else
+    setup_zoxide() {
+        print -P "%F{yellow}Installing zoxide...%f"
+        curl -sSfL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh
+    }
+fi
+
+typeset -ga _ZOXIDE_RECENT_DIRS=()
+
+if (( _HAS_ZOXIDE )); then
+    _zoxide_autocd_widget() {
+        if [[ -n $BUFFER && $BUFFER != *' '* ]] && ! whence "$BUFFER" >/dev/null 2>&1 && [[ ! -d $BUFFER ]]; then
+            local target=$(zoxide query -- "$BUFFER" 2>/dev/null)
+            if [[ -n $target ]]; then
+                cd "$target"
+                BUFFER=''
+                zle .reset-prompt
+                return
+            fi
+        fi
+        zle .accept-line
+    }
+    zle -N accept-line _zoxide_autocd_widget
+
+    _zoxide_job() {
+        zoxide query --list
+    }
+fi
 
 # --- Core autoloads ----------------------------------------------------------------
 
@@ -164,103 +203,107 @@ zstyle '*:compinit' arguments -C
 
 autoload -Uz add-zsh-hook
 
-# --- Load zsh-async ------------------------------------------------------------
-typeset -g ZSHASYNC_DIR="${ZSH_PLUGIN_DIR}/zsh-async"
-ensure_repo "https://github.com/mafredri/zsh-async.git" "$ZSHASYNC_DIR"
-source "${ZSHASYNC_DIR}/async.zsh"
-async_init
+autoload -Uz colors && colors
+setopt PROMPT_CR PROMPT_SP
 
-load_prompt() {
-    autoload -Uz colors && colors
-    setopt PROMPT_CR PROMPT_SP
-
-    _prompt_git_status() {
-        local ref branch
-        ref=$(command git symbolic-ref --quiet HEAD 2>/dev/null) || {
-            [[ $? == 128 ]] && return
-            ref=$(command git rev-parse --short HEAD 2>/dev/null) || return
-        }
-        branch=${ref#refs/heads/}
-        [[ -z $branch ]] && return
-
-        local git_status symbols
-        git_status="$(LC_ALL=C GIT_OPTIONAL_LOCKS=0 command git status 2>&1)"
-
-        local -a sym=('⇣⇡' '⇣' '⇡' '+' 'x' '!' '>' '?')
-        local -a pat=(
-            ' have diverged,'
-            'Your branch is behind '
-            'Your branch is ahead of '
-            'new file:   '
-            'deleted:    '
-            'modified:   '
-            'renamed:    '
-            'Untracked files:'
-        )
-        local i
-        for (( i = 1; i <= $#pat; i++ )); do
-            [[ $git_status == *${pat[i]}* ]] && symbols+=${sym[i]}
-        done
-
-        printf ' (%s%s)' "$branch" "${symbols:+ $symbols}"
+_prompt_git_status() {
+    local ref branch
+    ref=$(command git symbolic-ref --quiet HEAD 2>/dev/null) || {
+        [[ $? == 128 ]] && return
+        ref=$(command git rev-parse --short HEAD 2>/dev/null) || return
     }
+    branch=${ref#refs/heads/}
+    [[ -z $branch ]] && return
 
-    _prompt_set_git_psvars() {
-        psvar[3]="$1"
-        psvar[6]=${${${1#*\(}% *}%\)}
-        psvar[7]=${${1%\)}##* }
-        [[ ${1#*\(} != *' '* ]] && psvar[7]=''
-    }
+    local git_status symbols
+    git_status="$(LC_ALL=C GIT_OPTIONAL_LOCKS=0 command git status 2>&1)"
 
-    _prompt_redraw() {
-        _prompt_set_git_psvars "$1"
-        if zle && [[ -z $BUFFER ]] && (( _PROMPT_READY )); then
-            zle .reset-prompt
-        fi
-    }
+    local -a sym=('⇣⇡' '⇣' '⇡' '+' 'x' '!' '>' '?')
+    local -a pat=(
+        ' have diverged,'
+        'Your branch is behind '
+        'Your branch is ahead of '
+        'new file:   '
+        'deleted:    '
+        'modified:   '
+        'renamed:    '
+        'Untracked files:'
+    )
+    local i
+    for (( i = 1; i <= $#pat; i++ )); do
+        [[ $git_status == *${pat[i]}* ]] && symbols+=${sym[i]}
+    done
 
-    typeset -g _PROMPT_READY=0
-    _prompt_preexec() { _PROMPT_READY=0 }
-
-    _prompt_async_callback() {
-        # $1=job name, $2=return code, $3=output
-        _prompt_redraw "$3"
-    }
-
-    async_start_worker _prompt_worker -n
-    async_register_callback _prompt_worker _prompt_async_callback
-
-    _prompt_precmd() {
-        _prompt_set_git_psvars ''
-        async_flush_jobs _prompt_worker
-        async_job _prompt_worker _prompt_git_status
-        _PROMPT_READY=1
-    }
-
-    add-zsh-hook preexec _prompt_preexec
-    add-zsh-hook precmd _prompt_precmd
-
-    # --- Theme variables -----------------------------------------------------------
-
-    ZSH_THEME_GIT_PROMPT_PREFIX="%{$fg_bold[blue]%}(%{$fg[red]%}"
-    ZSH_THEME_GIT_PROMPT_SUFFIX="%{$reset_color%}"
-    ZSH_THEME_GIT_PROMPT_CLEAN="%{$fg[blue]%}) "
-    ZSH_THEME_VIRTUALENV_PREFIX="%{$fg_bold[blue]%}(%{$fg[green]%}"
-    ZSH_THEME_VIRTUALENV_SUFFIX="%{$fg[blue]%}) "
-
-    # --- Build PROMPT --------------------------------------------------------------
-
-    PROMPT=''
-    [[ -v WSL_DISTRO_NAME ]] && PROMPT+='%{$fg_bold[red]%}(WSL)%{$reset_color%} '
-    PROMPT+='%{$fg_bold[cyan]%}%d%{$reset_color%} '
-    PROMPT+='%{$(virtualenv_prompt_info)%}'
-    PROMPT+='%{%(3V.${ZSH_THEME_GIT_PROMPT_PREFIX}%6v%(7V.::%7v.)${ZSH_THEME_GIT_PROMPT_CLEAN}${ZSH_THEME_GIT_PROMPT_SUFFIX}.)%}'
-    PROMPT+=$'\n'
-    PROMPT+='%(?:%{$fg_bold[green]%}➜:%{$fg_bold[red]%}➜)  %{$reset_color%}$ '
+    printf ' (%s%s)' "$branch" "${symbols:+ $symbols}"
 }
 
+_prompt_set_git_psvars() {
+    psvar[3]="$1"
+    psvar[6]=${${${1#*\(}% *}%\)}
+    psvar[7]=${${1%\)}##* }
+    [[ ${1#*\(} != *' '* ]] && psvar[7]=''
+}
+
+typeset -g _PROMPT_READY=0
+
+_prompt_preexec() {
+    _PROMPT_READY=0
+}
+
+_prompt_redraw() {
+    _prompt_set_git_psvars "$1"
+    if zle && [[ -z $BUFFER ]] && (( _PROMPT_READY )); then
+        zle .reset-prompt
+    fi
+}
+
+# --- Theme variables -----------------------------------------------------------
+
+ZSH_THEME_GIT_PROMPT_PREFIX="%{$fg_bold[blue]%}(%{$fg[red]%}"
+ZSH_THEME_GIT_PROMPT_SUFFIX="%{$reset_color%}"
+ZSH_THEME_GIT_PROMPT_CLEAN="%{$fg[blue]%}) "
+ZSH_THEME_VIRTUALENV_PREFIX="%{$fg_bold[blue]%}(%{$fg[green]%}"
+ZSH_THEME_VIRTUALENV_SUFFIX="%{$fg[blue]%}) "
+
+# --- Build PROMPT --------------------------------------------------------------
+
 PROMPT=''
-load_prompt
+[[ -v WSL_DISTRO_NAME ]] && PROMPT+='%{$fg_bold[red]%}(WSL)%{$reset_color%} '
+PROMPT+='%{$fg_bold[cyan]%}%d%{$reset_color%} '
+PROMPT+='%{$(virtualenv_prompt_info)%}'
+PROMPT+='%{%(3V.${ZSH_THEME_GIT_PROMPT_PREFIX}%6v%(7V.::%7v.)${ZSH_THEME_GIT_PROMPT_CLEAN}${ZSH_THEME_GIT_PROMPT_SUFFIX}.)%}'
+PROMPT+=$'\n'
+PROMPT+='%(?:%{$fg_bold[green]%}➜:%{$fg_bold[red]%}➜)  %{$reset_color%}$ '
+
+
+# --- Async Worker & Callback --------------------------------------------------
+
+_main_async_callback() {
+    case $1 in
+        _prompt_git_status)     _prompt_redraw "$3" ;;
+        _zoxide_job) _ZOXIDE_RECENT_DIRS=( ${(f)3} ) ;;
+    esac
+}
+
+async_start_worker _main_worker -n
+async_register_callback _main_worker _main_async_callback
+
+_main_precmd() {
+    async_flush_jobs _main_worker
+
+    psvar[3]=''
+    async_job _main_worker _prompt_git_status
+
+    # Only do Zoxide if it exists
+    if (( _HAS_ZOXIDE )); then
+        async_job _main_worker _zoxide_job
+    fi
+
+    _PROMPT_READY=1
+}
+
+add-zsh-hook preexec _prompt_preexec
+add-zsh-hook precmd _main_precmd
 
 # --- System specific stuff ---------------------------------------------------------
 
@@ -280,7 +323,7 @@ if [[ $OSTYPE != Windows_NT && $OSTYPE != cygwin && $OSTYPE != msys ]]; then
         ;;
     esac
 
-elif [[ $OSTYPE == msys ]]; then
+elif [[ $OSTYPE == cygwin ]]; then
     explorer() {
         if [[ -n "$1" ]]; then
             explorer.exe "$(cygpath -w "$1")"
@@ -349,10 +392,7 @@ load_omz_libs() {
         "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/lib/key-bindings.zsh" \
         "${OMZ_LIB_DIR}/key-bindings.zsh"
 
-    if [[ -f "${OMZ_LIB_DIR}/key-bindings.zsh" ]]; then
-        zcompile_one "${OMZ_LIB_DIR}/key-bindings.zsh"
-        source "${OMZ_LIB_DIR}/key-bindings.zsh"
-    fi
+    source "${OMZ_LIB_DIR}/key-bindings.zsh"
 }
 load_omz_libs
 
@@ -362,8 +402,6 @@ load_zsh_autocomplete() {
         "https://github.com/marlonrichert/zsh-autocomplete.git" \
         "$ZSHAUTO_DIR" \
         "2be4e7f0b435138b0237d4f068b2a882fb06edc4^"
-
-    [[ -f "${ZSHAUTO_DIR}/zsh-autocomplete.plugin.zsh" ]] || return
 
     if (( ${+ZSH_UPDATING} )) || [[ ! -f "${ZSHAUTO_DIR}/zsh-autocomplete.plugin.zsh.zwc" ]]; then
         local -a files_to_compile
@@ -390,12 +428,13 @@ load_zsh_autocomplete() {
 
 load_zsh_autocomplete
 
-# --- Oh My Zsh virtualenv plugin ---------------------------------------------------
+# --- virtualenv --------------------------------------------------------------------
 
-# Sourced from Oh My Zsh
-function virtualenv_prompt_info(){
-  [[ -n ${VIRTUAL_ENV} ]] || return
-  echo "${ZSH_THEME_VIRTUALENV_PREFIX=[}${VIRTUAL_ENV_PROMPT:-${VIRTUAL_ENV:t:gs/%/%%}}${ZSH_THEME_VIRTUALENV_SUFFIX=]}"
+function virtualenv_prompt_info() {
+    [[ -n ${VIRTUAL_ENV} ]] || return
+    local venv_name="${VIRTUAL_ENV_PROMPT:-${VIRTUAL_ENV:t:gs/%/%%}}"
+    venv_name="${venv_name//[\(\) ]/}"
+    print -rn -- "${ZSH_THEME_VIRTUALENV_PREFIX-[}${venv_name}${ZSH_THEME_VIRTUALENV_SUFFIX-]}"
 }
 
 # disables prompt mangling in virtual_env/bin/activate
@@ -445,52 +484,6 @@ if [[ ! -f "$HOME/.local/bin/uv" && ! -f "$HOME/.local/bin/uv.exe" ]]; then
     }
 fi
 
-# --- Zoxide ------------------------------------------------------------------------
-
-if [[ ! -f "$HOME/.local/bin/zoxide" && ! -f "$HOME/.local/bin/zoxide.exe" ]]; then
-    setup_zoxide() {
-        print -P "%F{yellow}Installing zoxide...%f"
-        curl -sSfL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh
-    }
-else
-    ensure_eval_cache \
-        "zoxide init zsh --cmd cd" \
-        "${ZSH_CACHE_DIR}/zoxide.zsh"
-    source "${ZSH_CACHE_DIR}/zoxide.zsh"
-
-    async_start_worker _prompt_dir_worker -n
-    async_register_callback _prompt_dir_worker _prompt_dir_callback
-
-    typeset -ga _ZOXIDE_RECENT_DIRS=()
-    _prompt_dir_callback() { _ZOXIDE_RECENT_DIRS=( ${(f)3} ) }
-
-    chpwd_recent_filehandler() { reply=( $_ZOXIDE_RECENT_DIRS[@] ) }
-    chpwd_recent_dirs() {}
-
-    _zoxide_refresh() {
-        async_flush_jobs _prompt_dir_worker
-        async_job _prompt_dir_worker zoxide query --list
-    }
-    add-zsh-hook chpwd _zoxide_refresh
-    add-zsh-hook precmd _zoxide_refresh
-
-    _zoxide_autocd_widget() {
-        if [[ -n $BUFFER && $BUFFER != *' '* ]] \
-            && ! whence "$BUFFER" >/dev/null 2>&1 \
-            && [[ ! -d $BUFFER ]]; then
-            local target
-            target=$(zoxide query -- "$BUFFER" 2>/dev/null)
-            if [[ -n $target ]]; then
-                cd "$target"
-                BUFFER=''
-                zle .reset-prompt
-                return
-            fi
-        fi
-        zle .accept-line
-    }
-    zle -N accept-line _zoxide_autocd_widget
-fi
 
 # --- Completion system init --------------------------------------------------------
 
@@ -504,18 +497,16 @@ load_completions() {
         $fpath
     )
 
-    generate_completion "${ZSH_COMPLETION_DIR}/_uv"       uv generate-shell-completion zsh
-    generate_completion "${ZSH_COMPLETION_DIR}/_poetry"   poetry completions zsh
-    generate_completion "${ZSH_COMPLETION_DIR}/_packwiz"  packwiz completion zsh
-    generate_completion "${ZSH_COMPLETION_DIR}/_rustup"   rustup completions zsh rustup
+    generate_completion "${ZSH_COMPLETION_DIR}/_uv"      uv generate-shell-completion zsh
+    generate_completion "${ZSH_COMPLETION_DIR}/_poetry"  poetry completions zsh
+    generate_completion "${ZSH_COMPLETION_DIR}/_packwiz" packwiz completion zsh
+    generate_completion "${ZSH_COMPLETION_DIR}/_rustup"  rustup completions zsh rustup
     download_completion "${ZSH_COMPLETION_DIR}/_git"      https://raw.githubusercontent.com/git/git/master/contrib/completion/git-completion.zsh
 
-    [[ -f "${ZSH_COMPLETION_DIR}/_pip" ]] || \
-        generate_completion "${ZSH_COMPLETION_DIR}/_pip"      pip completion --zsh
+    generate_completion "${ZSH_COMPLETION_DIR}/_pip"      pip completion --zsh
 
 
-    [[ -f "${ZSH_COMPLETION_DIR}/_docker" ]] || \
-        generate_completion "${ZSH_COMPLETION_DIR}/_docker"   docker completion zsh
+    generate_completion "${ZSH_COMPLETION_DIR}/_docker"   docker completion zsh
 
     if [[ ! -f "${ZSH_COMPLETION_DIR}/_cargo" || -n "$ZSH_UPDATING" ]]; then
         local sysroot
@@ -525,6 +516,15 @@ load_completions() {
                 "${sysroot}/share/zsh/site-functions/_cargo" \
                 "${ZSH_COMPLETION_DIR}/_cargo"
         fi
+    fi
+
+    if (( ${+ZSH_UPDATING} )); then
+        local -a comps_to_compile
+        setopt localoptions extendedglob
+
+        comps_to_compile+=( "${ZSH_COMPLETIONS_DIR}/src"/_* )
+
+        (( ${#comps_to_compile[@]} > 0 )) && zcompile_many "${comps_to_compile[@]}"
     fi
 }
 load_completions
