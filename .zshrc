@@ -164,26 +164,26 @@ zstyle '*:compinit' arguments -C
 
 autoload -Uz add-zsh-hook
 
+# --- Load zsh-async ------------------------------------------------------------
+typeset -g ZSHASYNC_DIR="${ZSH_PLUGIN_DIR}/zsh-async"
+ensure_repo "https://github.com/mafredri/zsh-async.git" "$ZSHASYNC_DIR"
+source "${ZSHASYNC_DIR}/async.zsh"
+async_init
+
 load_prompt() {
     autoload -Uz colors && colors
     setopt PROMPT_CR PROMPT_SP
 
-    # --- Git branch + status symbols -----------------------------------------------
-    #
-    # Returns a string like " (main ⇡)" or " (main)" or nothing outside a repo
-
     _prompt_git_status() {
         local ref branch
-        ref=$(command git symbolic-ref --quiet HEAD 2>/dev/null)
-        case $? in
-            0) ;;           # normal branch
-            128) return ;;  # not a git repo
-            *) ref=$(command git rev-parse --short HEAD 2>/dev/null) || return ;;
-        esac
+        ref=$(command git symbolic-ref --quiet HEAD 2>/dev/null) || {
+            [[ $? == 128 ]] && return
+            ref=$(command git rev-parse --short HEAD 2>/dev/null) || return
+        }
         branch=${ref#refs/heads/}
         [[ -z $branch ]] && return
 
-        local git_status symbols i
+        local git_status symbols
         git_status="$(LC_ALL=C GIT_OPTIONAL_LOCKS=0 command git status 2>&1)"
 
         local -a sym=('⇣⇡' '⇣' '⇡' '+' 'x' '!' '>' '?')
@@ -197,57 +197,43 @@ load_prompt() {
             'renamed:    '
             'Untracked files:'
         )
+        local i
         for (( i = 1; i <= $#pat; i++ )); do
             [[ $git_status == *${pat[i]}* ]] && symbols+=${sym[i]}
         done
 
-        [[ -n $symbols ]] && symbols=" $symbols"
-        printf ' (%s%s)' "$branch" "$symbols"
+        printf ' (%s%s)' "$branch" "${symbols:+ $symbols}"
     }
 
-    # Populate psvar[3] (full string), psvar[6] (branch), psvar[7] (symbols).
-    # These are what PROMPT references via %(3V…), %6v, %(7V…).
     _prompt_set_git_psvars() {
         psvar[3]="$1"
         psvar[6]=${${${1#*\(}% *}%\)}
-        if [[ ${1#*\(} == *' '* ]]; then
-            psvar[7]=${${1%\)}##* }
-        else
-            psvar[7]=''
-        fi
+        psvar[7]=${${1%\)}##* }
+        [[ ${1#*\(} != *' '* ]] && psvar[7]=''
     }
 
-    typeset -g _PROMPT_READY=0
-
-    _prompt_preexec() {
-        _PROMPT_READY=0
-    }
-
-    _prompt_git_status_async() {
-        _prompt_git_status >| "/tmp/_prompt_git_$$"
-        kill -USR1 $$ 2>/dev/null
-    }
-
-    TRAPUSR1() {
-        [[ -f "/tmp/_prompt_git_$$" ]] || return
-        local response
-        response=$(< "/tmp/_prompt_git_$$")
-        rm -f "/tmp/_prompt_git_$$"
-        _prompt_set_git_psvars "$response"
+    _prompt_redraw() {
+        _prompt_set_git_psvars "$1"
         if zle && [[ -z $BUFFER ]] && (( _PROMPT_READY )); then
             zle .reset-prompt
         fi
     }
 
+    typeset -g _PROMPT_READY=0
+    _prompt_preexec() { _PROMPT_READY=0 }
+
+    _prompt_async_callback() {
+        # $1=job name, $2=return code, $3=output
+        _prompt_redraw "$3"
+    }
+
+    async_start_worker _prompt_worker -n
+    async_register_callback _prompt_worker _prompt_async_callback
+
     _prompt_precmd() {
-        if [[ -n $_PROMPT_GIT_PID ]]; then
-            kill -HUP $_PROMPT_GIT_PID 2>/dev/null
-            _PROMPT_GIT_PID=''
-        fi
-        rm -f "/tmp/_prompt_git_$$"
         _prompt_set_git_psvars ''
-        _prompt_git_status_async &!
-        _PROMPT_GIT_PID=$!
+        async_flush_jobs _prompt_worker
+        async_job _prompt_worker _prompt_git_status
         _PROMPT_READY=1
     }
 
@@ -258,7 +244,6 @@ load_prompt() {
 
     ZSH_THEME_GIT_PROMPT_PREFIX="%{$fg_bold[blue]%}(%{$fg[red]%}"
     ZSH_THEME_GIT_PROMPT_SUFFIX="%{$reset_color%}"
-    ZSH_THEME_GIT_PROMPT_DIRTY="%{$fg[blue]%}) %{$fg[yellow]%}✗ "
     ZSH_THEME_GIT_PROMPT_CLEAN="%{$fg[blue]%}) "
     ZSH_THEME_VIRTUALENV_PREFIX="%{$fg_bold[blue]%}(%{$fg[green]%}"
     ZSH_THEME_VIRTUALENV_SUFFIX="%{$fg[blue]%}) "
@@ -473,7 +458,21 @@ else
         "${ZSH_CACHE_DIR}/zoxide.zsh"
     source "${ZSH_CACHE_DIR}/zoxide.zsh"
 
-    typeset -g _ZOXIDE_CMD_NOT_FOUND=''
+    async_start_worker _prompt_dir_worker -n
+    async_register_callback _prompt_dir_worker _prompt_dir_callback
+
+    typeset -ga _ZOXIDE_RECENT_DIRS=()
+    _prompt_dir_callback() { _ZOXIDE_RECENT_DIRS=( ${(f)3} ) }
+
+    chpwd_recent_filehandler() { reply=( $_ZOXIDE_RECENT_DIRS[@] ) }
+    chpwd_recent_dirs() {}
+
+    _zoxide_refresh() {
+        async_flush_jobs _prompt_dir_worker
+        async_job _prompt_dir_worker zoxide query --list
+    }
+    add-zsh-hook chpwd _zoxide_refresh
+    add-zsh-hook precmd _zoxide_refresh
 
     _zoxide_autocd_widget() {
         if [[ -n $BUFFER && $BUFFER != *' '* ]] \
@@ -491,11 +490,6 @@ else
         zle .accept-line
     }
     zle -N accept-line _zoxide_autocd_widget
-    chpwd_recent_filehandler() {
-        reply=( ${(f)"$(zoxide query --list 2>/dev/null)"} )
-    }
-
-    chpwd_recent_dirs() {}
 fi
 
 # --- Completion system init --------------------------------------------------------
