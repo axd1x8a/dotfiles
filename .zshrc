@@ -334,6 +334,10 @@ elif [[ $OSTYPE == cygwin ]]; then
     zstyle ':completion:*' fake-files '/: c v'
 fi
 
+md5ns() {
+    echo -n "$1" | md5sum | cut -c1-4
+}
+
 # --- History configuration ---------------------------------------------------------
 
 # Sourced from Oh My Zsh
