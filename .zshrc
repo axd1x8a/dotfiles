@@ -10,6 +10,14 @@ typeset -g ZSH_CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/zsh"
 
 mkdir -p "$ZSH_PLUGIN_DIR" "$ZSH_COMPLETION_DIR" "$ZSH_CACHE_DIR"
 
+case ":${PATH}:" in
+    *:"$HOME/.local/bin":*)
+        ;;
+    *)
+    export PATH="$HOME/.local/bin:$PATH"
+    ;;
+esac
+
 zsh_update() {
     print -P "%F{yellow}Updating Zsh plugins and completions...%f"
 
@@ -143,6 +151,12 @@ if [[ -x "$(command -v zoxide)" ]]; then
     _HAS_ZOXIDE=1
     ensure_eval_cache "zoxide init zsh --cmd cd" "${ZSH_CACHE_DIR}/zoxide.zsh"
     source "${ZSH_CACHE_DIR}/zoxide.zsh"
+
+    if [[ $OSTYPE == cygwin ]]; then
+        function __zoxide_pwd() {
+            \command cygpath -w "$(\builtin pwd -L)"
+        }
+    fi
 else
     setup_zoxide() {
         print -P "%F{yellow}Installing zoxide...%f"
@@ -165,7 +179,6 @@ if (( _HAS_ZOXIDE )); then
         fi
         zle .accept-line
     }
-    zle -N accept-line _zoxide_autocd_widget
 
     _zoxide_job() {
         zoxide query --list
@@ -285,11 +298,18 @@ _main_async_callback() {
     esac
 }
 
-async_start_worker _main_worker -n
+async_start_worker _main_worker -n -u
 async_register_callback _main_worker _main_async_callback
 
 _main_precmd() {
-    async_flush_jobs _main_worker
+    if ! zpty -t _main_worker &>/dev/null; then
+        zpty -d _main_worker 2>/dev/null
+        async_stop_worker _main_worker 2>/dev/null
+        async_start_worker _main_worker -n -u
+        async_register_callback _main_worker _main_async_callback
+    fi
+
+    async_worker_eval _main_worker cd -q -- "$PWD"
 
     psvar[3]=''
     async_job _main_worker _prompt_git_status
@@ -297,6 +317,7 @@ _main_precmd() {
     # Only do Zoxide if it exists
     if (( _HAS_ZOXIDE )); then
         async_job _main_worker _zoxide_job
+        zle -N accept-line _zoxide_autocd_widget
     fi
 
     _PROMPT_READY=1
@@ -314,14 +335,6 @@ if [[ $OSTYPE != Windows_NT && $OSTYPE != cygwin && $OSTYPE != msys ]]; then
     if [[ -e /usr/share/zsh/vendor-completions/_docker ]]; then
         unfunction _docker
     fi
-
-    case ":${PATH}:" in
-        *:"$HOME/.local/bin":*)
-            ;;
-        *)
-        export PATH="$HOME/.local/bin:$PATH"
-        ;;
-    esac
 
 elif [[ $OSTYPE == cygwin ]]; then
     explorer() {
@@ -397,15 +410,18 @@ load_omz_libs() {
         "${OMZ_LIB_DIR}/key-bindings.zsh"
 
     source "${OMZ_LIB_DIR}/key-bindings.zsh"
+
+    bindkey -M emacs '^[OA' up-line-or-beginning-search
+    bindkey -M emacs '^[OB' down-line-or-beginning-search
 }
 load_omz_libs
 
 load_zsh_autocomplete() {
     typeset -g ZSHAUTO_DIR="${ZSH_PLUGIN_DIR}/zsh-autocomplete"
     ensure_repo \
-        "https://github.com/marlonrichert/zsh-autocomplete.git" \
+        "https://github.com/SaeGon-Heo/zsh-autocomplete.git" \
         "$ZSHAUTO_DIR" \
-        "2be4e7f0b435138b0237d4f068b2a882fb06edc4^"
+        "0ed749e71e60c1d4d30357124aac3c8662dffee4^"
 
     if (( ${+ZSH_UPDATING} )) || [[ ! -f "${ZSHAUTO_DIR}/zsh-autocomplete.plugin.zsh.zwc" ]]; then
         local -a files_to_compile
@@ -431,6 +447,8 @@ load_zsh_autocomplete() {
 }
 
 load_zsh_autocomplete
+
+(( _HAS_ZOXIDE )) && zle -N accept-line _zoxide_autocd_widget
 
 # --- virtualenv --------------------------------------------------------------------
 
